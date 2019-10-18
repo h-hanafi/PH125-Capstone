@@ -38,3 +38,6 @@ rsconnect/
 #Large Files
 *.zip
 *.dat
+
+#Scratch Paper Code
+Scratch.*
