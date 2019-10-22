@@ -101,7 +101,7 @@ b_i <- train %>% group_by(movieId) %>%
 
 ## Modelling the User Effect
 #Finding optimal Lamda Parameter
-l <- seq(0,10,0.25)
+l <- seq(10,20,0.25)
 RMSE_lamda <- map_df(l,function(l){
 
   b_u <- train %>% left_join(b_i, by = "movieId") %>% group_by(userId) %>% 
@@ -252,18 +252,20 @@ b_y <- train %>% left_join(b_i, by = "movieId") %>% left_join(b_u, by = "userId"
 
 #Final Model
 
-prediction <- function(validation){
+
+
+RMSE_Final <- function(validation){
   validation <- validation %>% separate_rows(genres, sep = "\\|")
   validation <- validation %>% 
     mutate(year = str_extract(title,"\\(\\d{4}\\)")) %>% mutate(year = str_replace_all(year, "[//(//)]", ""))
   
-  validation %>% left_join(b_i, by = "movieId") %>% 
+  pred <- validation %>% left_join(b_i, by = "movieId") %>% 
     left_join(b_u, by = "userId") %>% 
     left_join(b_g, by = "genres") %>% 
     left_join(b_y, by = "year") %>%
     mutate(pred = mu + b_i + b_u + b_g + b_y) %>% pull(pred)
+  
+  RMSE(pred,validation$rating)
 }  
 
-pred <- prediction(validation)
-RMSE_Final <- RMSE(pred,validation$rating)
-RMSE_Final
+RMSE_Final(validation)
