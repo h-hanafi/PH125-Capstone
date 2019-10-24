@@ -1,0 +1,592 @@
+---
+title: "Hussam Hanafi MovieLens Submission"
+author: "Hussam Hanafi"
+date: "10/24/2019"
+output:
+  word_document: default
+---
+```{r Libraries, include=FALSE}
+## Loading required Libraries
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+#Setting Significant figures Globally
+options(digits = 5)
+```
+# Introduction
+
+This report will detail the work done to build a recommendation system using the 10M version of the MovieLens package.
+
+In order to achieve this we will estimate a linear model using the various variables available to us in the data set.
+
+## The Data Set
+
+```{r Data, include=FALSE}
+
+### Generating the Data
+
+## Downloading and Wrangling the Raw Data
+#dl <- tempfile()
+#download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+#REMOVE THESE BEFORE SUBMISSION#
+dl <- file.path("C://Users//USER//Documents//R//Projects//PH125-Capstone//ml-10m.zip")
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+#REMOVE#
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+## Creating the Validation set using 10% of MovieLens data
+
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+#Subset the edx set into training and test sets
+test_index <- createDataPartition(y = edx$rating, times = 1, p = 0.2, list = FALSE)
+train <- edx[-test_index,]
+temp <- edx[test_index,]
+
+# Make sure userId and movieId in test set are also in train set
+test <- temp %>% 
+  semi_join(train, by = "movieId") %>%
+  semi_join(train, by = "userId")
+
+# Add rows removed from test set back into train set
+removed <- anti_join(temp, test)
+train <- rbind(train, removed)
+
+#Remove excess objects and files
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+unlink(file.path(getwd(),"ml-10M100K"), recursive = TRUE)
+```
+
+The data set is comprised of ratings from 69,878 users across 10,677 movies defined by a movieId. It also includes the movie title, when the movie was rated as well as the genres it can be categorized by.
+
+Below is a sample of the data set to illustrate:
+
+```{r data set, echo=FALSE}
+edx %>% sample_n(3) %>% knitr::kable(align = "l", caption = "Data Sample")
+```
+
+We divide this data set into a Training and Validation set; and then further divide the training set to generate a training subset and test set that we will use to optimize any parameters.
+
+Thus our validation set will only be used in the final prediction but not throughout the training process to avoid over-training.
+
+## Goal
+
+The end goal is to generate a linear model where each variable represents an effect that can be extracted from the data. We will use the Root Mean Square Error (RMSE) as an indicator of the models success thus our target will be to minimize it.
+
+```{r RMSE, include=FALSE}
+## Writing the function to calculate the RMSE
+RMSE <- function(x,y){
+  sqrt(mean((x-y)^2))
+}
+```
+
+# Methodology
+
+Throughout the report we will take each possible effect and visualize it to determine if it is worth including in our model.
+
+We will use the mean rating of each effect as a base line and include it in our model.
+
+## Just the Mean
+To start with we will calculate the mean of all the ratings as a base line for our model.
+
+```{r Just the mean, include=FALSE}
+##Initialising Data Frame for the Model Results
+
+#Predicting using only the mean
+mu <- mean(train$rating)
+naive_rmse <- RMSE(train$rating, mu)
+
+#Results data frame
+rmse_results <- data_frame(Method = "Just the average", RMSE = naive_rmse, Lamda = NA)
+```
+
+Thus our Model will be $Y = \hat{\mu} +\varepsilon$, with $\mu=$ `r mu` and RMSE:
+
+```{r RMSE Table just the mean, echo=FALSE, warning=FALSE}
+rmse_results %>% knitr::kable(align = "l")
+```
+
+## The Movie Effect
+
+The first effect we will take into consideration is the movie effect $b_i$, or the average rating for each movie. This makes intuitive sense as some movies will be more popular or critically acclaimed than the rest.
+
+To model the movie effect we will calculate the average rating for each movie regularized with a penalty term $\lambda$ to minimize the effect of rarely rated movies on our average. therefore $\hat{b_i} = \frac{1}{n+\lambda}\sum_{i=1}^{n_i}(Y_i-\mu)$
+
+Thus our model now becomes $Y_i = \mu + b_i + \varepsilon$
+
+### Visualizations
+
+A quick visualization of a sample of the movies shows that there is indeed variation across the different movies.
+
+```{r Movie effect scatterplot, echo=FALSE}
+#Visualising the movie Effect with an arbitrary lambda
+l <- 5
+b_i <- train %>% group_by(movieId) %>% 
+  summarize(b_i = sum(rating - mu)/(n()+l), n = n())
+
+b_i %>% sample_n(40) %>%
+  ggplot(aes(as.character(movieId), b_i, size = n)) + 
+  geom_point(alpha = 0.3) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1)) + xlab("movieId")
+```
+
+Below we can see how the averages are distributed:
+
+```{r Movie effect histogram, echo=FALSE}
+b_i %>% ggplot(aes(b_i)) + geom_histogram(bins = 15, color = "black")
+```
+
+### The Model
+
+Now that we have confirmed the existence of the movie effect we can work on identifying the $\lambda$ that optimizes the RMSE on our test set using the below code:
+
+```{r movie effect, echo=TRUE}
+#Finding optimal Lamda Parameter
+l <- seq(0,20,0.25)
+
+RMSE_lamda <- map_df(l,function(l){
+
+  b_i <- train %>% group_by(movieId) %>% 
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  predicted_ratings <-  test %>% left_join(b_i, by = "movieId") %>%
+    mutate(pred = mu + b_i) %>% pull(pred)
+  
+  data.frame(l = l, RMSE = RMSE(predicted_ratings,test$rating))
+})
+```
+
+We can confirm that the optimal $\lambda$ is within the range we trained for by visualizing it's effect on the RMSE:
+
+```{r lambda visualisation movie effect, echo=FALSE}
+#Visualizing the effect of Lamda
+RMSE_lamda %>% ggplot(aes(l,RMSE)) + geom_point()
+```
+
+Thus our optimal $\lambda$ and respective RMSE is:
+
+```{r movie effect results, echo=FALSE}
+#Inputing results
+result <- min(RMSE_lamda$RMSE)
+l <- RMSE_lamda$l[which.min(RMSE_lamda$RMSE)]
+rmse_results <- bind_rows(rmse_results, data_frame(Method = "Mean + b_i", RMSE = result, Lamda = l))
+
+#Saving the optimal Movie Effect
+b_i <- train %>% group_by(movieId) %>% 
+  summarize(b_i = sum(rating - mu)/(n() + l))
+
+rmse_results %>% knitr::kable(align = "l")
+```
+
+## The User Effect
+
+Next We will consider the User effect. Once again it would make intuitive sense that some users would be harsher critics than others.
+
+Once again we will calculate the average rating each user gives regularized with our parameter $\lambda$ similar to what was done with the movie effect.
+
+Our new model will be $Y_{iu} = \mu + b_i + b_u + \varepsilon$
+
+### Visualizations
+
+A quick Scatter plot and histogram will confirm our intuition
+```{r scatter plot user effect, echo=FALSE}
+l<- 5
+
+b_u <- train %>% left_join(b_i, by = "movieId") %>% group_by(userId) %>% 
+  summarize(b_u = sum(rating - mu - b_i)/(n()+l), n = n())
+
+b_u %>% sample_n(50) %>% 
+  ggplot(aes(as.character(userId), b_u, size = n)) + geom_point(alpha =0.3) + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust =1))
+```
+
+```{r histogram plot user effect, echo = FALSE}
+b_u %>% ggplot(aes(b_u)) + geom_histogram(bins = 15, color = "black")
+```
+
+### The Model
+
+Our next step is to optimize our $\lambda$ parameter for the User effect:
+
+```{r User effect model, echo=TRUE}
+l <- seq(0,20,0.25)
+RMSE_lamda <- map_df(l,function(l){
+
+  b_u <- train %>% left_join(b_i, by = "movieId") %>% group_by(userId) %>% 
+    summarize(b_u = sum(rating - mu - b_i)/(n()+l))
+  
+  predicted_ratings <-  test %>% left_join(b_i, by = "movieId") %>% left_join(b_u, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u) %>% pull(pred)
+  
+  data.frame(l = l, RMSE = RMSE(predicted_ratings,test$rating))
+})
+```
+
+We confirm that our optimal $\lambda$ is within the range we tested:
+
+```{r Lamda plot user effect, echo=FALSE}
+#Visualizing the effect of Lamda
+RMSE_lamda %>% ggplot(aes(l,RMSE)) + geom_point()
+```
+
+Thus our optimal $\lambda$ and  respective RMSE:
+
+```{r results user effect, echo=FALSE}
+#Inputing reults
+result <- min(RMSE_lamda$RMSE)
+l <- RMSE_lamda$l[which.min(RMSE_lamda$RMSE)]
+rmse_results <- bind_rows(rmse_results, data_frame(Method = "Mean + b_i + b_u", RMSE = result, Lamda = l))
+rmse_results %>% knitr::kable(align = "l")
+
+#Saving Optimal User effect
+b_u <- train %>% left_join(b_i, by = "movieId") %>% group_by(userId) %>% 
+  summarize(b_u = sum(rating - mu - b_i)/(n() + l))
+```
+
+## Genre Effect
+
+Next We will consider the Genre effect. Intuitively some genres would be more popular than others.
+
+The Genre variable is coded as a string containing all relevant genres the movie falls under:
+
+```{r viewing the genre, echo=FALSE}
+edx %>% sample_n(5) %>% select(title, genres) %>% knitr::kable(align = "l")
+```
+
+We will calculate the regularized average rating for each genre combination similar to what was done with the movie effect. 
+
+Our new model will be $Y_{iu} = \mu + b_i + b_u + b_g +\varepsilon$
+
+### Visualizations
+
+Once again we confirm our intuition with some visualizations
+
+```{r scatter plot genre effect, echo=FALSE}
+#Exploration of the genre effect with an arbitrary Lamda
+l <- 5
+
+b_g <- train %>% left_join(b_i, by= "movieId") %>% left_join(b_u, by = "userId") %>% 
+  group_by(genres) %>%
+  summarize(b_g = sum(rating - mu - b_i - b_u)/(n()+l), n = n()) 
+
+
+#Visualising the Genre effect
+b_g %>% sample_n(20) %>% ggplot(aes(genres, b_g, size = n)) + geom_point(alpha = 0.3) + theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+```{r histogram genre effect, echo=FALSE}
+b_g %>% ggplot(aes(b_g)) + geom_histogram(bins = 15, color = "black")
+```
+
+### The Model
+
+Now that we have confirmed a genre effect we can find our optimal $\lambda$ and integrate the genre effect into our model.
+
+```{r Finding Optimal Lamda for the genre effect, echo=TRUE}
+l <- seq(0,20,0.25)
+RMSE_lamda <- map_df(l,function(l){
+  
+  b_g <- train %>% left_join(b_i, by= "movieId") %>% left_join(b_u, by = "userId") %>% group_by(genres) %>%
+    summarize(b_g = sum(rating - mu - b_i - b_u)/(n()+l))
+  
+  predicted_ratings <-  test %>% left_join(b_i, by = "movieId") %>% left_join(b_u, by = "userId") %>%   left_join(b_g, by = "genres") %>%
+    mutate(pred = mu + b_i + b_u + b_g) %>% pull(pred)
+  
+  data.frame(l = l, RMSE = RMSE(predicted_ratings,test$rating))
+})
+```
+
+We confirm our optimal Lamda is in the range we tested for
+```{r Lamda Plot genre effect, echo=FALSE}
+#Visualizing the effect of Lamda
+RMSE_lamda %>% ggplot(aes(l,RMSE)) + geom_point()
+```
+
+Our Optimal Lamda and the respective RMSE
+
+```{r Genre effect, echo=FALSE}
+#Inputing reults
+result <- min(RMSE_lamda$RMSE)
+l <- RMSE_lamda$l[which.min(RMSE_lamda$RMSE)]
+rmse_results <- bind_rows(rmse_results, data_frame(Method = "Mean + b_i + b_u + b_g", RMSE = result, Lamda = l))
+
+rmse_results %>% knitr::kable(align = "l")
+#Saving Optimal Genre effect
+b_g <- train %>% left_join(b_i, by= "movieId") %>% left_join(b_u, by = "userId") %>% group_by(genres) %>%
+  summarize(b_g = sum(rating - mu - b_i - b_u)/(n()+l))
+```
+
+## Detailed Genre Effect
+
+A closer look at the Genre Variable shows potential for improvement. As it is every observation of the genre variable is a combination of multiple possible genres. By splitting it into its components we can capture the effect of each individual genre; ending up with fewer possible observations each with a larger number of observations  leading to a more robust estimation.
+
+The below code achieves the split:
+
+```{r splitting the genre, echo=TRUE}
+#Seperating the genres variable into its components in both sets
+train <- train %>% separate_rows(genres, sep = "\\|") 
+test <- test %>% separate_rows(genres, sep = "\\|")
+```
+
+### Visualizations
+
+We can expect that this new version of genre variable will show us a confirmation of our assumptions
+
+```{r new genre effect scatter plot, echo=FALSE}
+#Exploration of the genre effect with an arbitrary Lamda
+l <- 5
+
+b_g <- train %>% left_join(b_i, by= "movieId") %>% left_join(b_u, by = "userId") %>% 
+  group_by(genres) %>%
+  summarize(b_g = sum(rating - mu - b_i - b_u)/(n()+l), n = n()) 
+
+#Visualising the new Genre effect
+b_g %>% ggplot(aes(genres, b_g, size = n)) + geom_point(alpha = 0.3) +  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Our distribution also shows us that there are some clearer variations as well as some outliers
+```{r new genre effect distribution, echo=FALSE}
+#Visualising the distribution
+b_g %>% ggplot(aes(b_g)) + geom_histogram(color = "black", bins = 30)
+```
+
+### Model
+
+We rebuild our model in the same way now that we have Wrangled our genre variable:
+
+```{r detailed genre model, echo=TRUE}
+l <- seq(0,20,0.25)
+RMSE_lamda <- map_df(l,function(l){
+
+  b_g <- train %>% left_join(b_i, by= "movieId") %>% left_join(b_u, by = "userId") %>% group_by(genres) %>%
+    summarize(b_g = sum(rating - mu - b_i - b_u)/(n()+l))
+  
+  predicted_ratings <-  test %>% left_join(b_i, by = "movieId") %>% left_join(b_u, by = "userId") %>% left_join(b_g, by = "genres") %>%
+    mutate(pred = mu + b_i + b_u + b_g) %>% pull(pred)
+  
+  data.frame(l = l, RMSE = RMSE(predicted_ratings,test$rating))
+})
+```
+
+Confirm the optimization of our $\lambda$ parameter:
+
+```{r lamdbda visualization detailed genre effect, echo=FALSE}
+#Visualizing the effect of Lamda
+RMSE_lamda %>% ggplot(aes(l,RMSE)) + geom_point()
+```
+
+And finally take a look at our results:
+
+```{r detailed genre effect results, echo=FALSE}
+#Inputing reults
+result <- min(RMSE_lamda$RMSE)
+l <- RMSE_lamda$l[which.min(RMSE_lamda$RMSE)]
+rmse_results <- bind_rows(rmse_results, data_frame(Method = "mu + b_i + b_u + detailed_b_g", RMSE = result, Lamda = l))
+
+rmse_results %>% knitr::kable(align = "l")
+#Saving Optimal Genre effect
+b_g <- train %>% left_join(b_i, by= "movieId") %>% left_join(b_u, by = "userId") %>% group_by(genres) %>%
+  summarize(b_g = sum(rating - mu - b_i - b_u)/(n()+l))
+```
+
+## Effect of the release year
+
+Looking at the title variable we find that the release year of the movie is encoded as part of the character string as we can see below:
+
+```{r title print, echo=FALSE}
+train %>% sample_n(5) %>% select(title) %>% knitr::kable(label = "l")
+```
+
+We will analyze the year effect to see if it can add to our model, the first step is to  wrangle the release year information from the title variable.
+
+```{r year extraction, echo=TRUE}
+#Extracting the release of the Movie from the title
+train <- train %>% 
+  mutate(year = str_extract(title,"\\(\\d{4}\\)")) %>% 
+  mutate(year = str_replace_all(year, "[//(//)]", ""))
+
+test <- test %>%
+  mutate(year = str_extract(title,"\\(\\d{4}\\)")) %>% 
+  mutate(year = str_replace_all(year, "[//(//)]", ""))
+```
+
+### Visualizations
+
+Visualizing the Scatter Plot shows that there appears to be a trend in how movies from different years are related:
+
+```{r year scatter plot, echo=FALSE}
+l <- 5
+
+b_y <- train %>% left_join(b_i, by = "movieId") %>% left_join(b_u, by = "userId") %>% left_join(b_g, by = "genres") %>%
+  group_by(year) %>%
+  summarize(b_y = sum(rating - mu - b_i - b_u - b_g)/(n()+l), n = n())
+
+b_y %>% ggplot(aes(as.numeric(year), b_y, size = n)) + 
+  geom_point(alpha = 0.3) + xlab("year")
+```
+
+This pattern is more visible in the below plot:
+
+```{r year smooth plot, echo=FALSE, warning=FALSE}
+b_y %>% ggplot(aes(as.numeric(year),y = b_y)) + 
+  geom_smooth() + geom_point() + xlab("year")
+```
+
+And in the below histogram:
+
+```{r year histogram, echo=FALSE}
+b_y %>% ggplot(aes(b_y)) + geom_histogram(color = "black")
+```
+
+As such  our new model will be $Y_{iu} = \mu + b_i + b_u + b_g + b_y + \varepsilon$
+
+### Model
+
+We build our model in the same way as before:
+
+```{r year model, echo=TRUE}
+l <- seq(0,20,0.25)
+RMSE_lamda <- map_df(l,function(l){
+  
+  b_y <- train %>% left_join(b_i, by = "movieId") %>% left_join(b_u, by = "userId") %>% left_join(b_g, by = "genres") %>%
+    group_by(year) %>%
+    summarize(b_y = sum(rating - mu - b_i - b_u - b_g)/(n()+l))
+  
+  predicted_ratings <-  test %>% 
+    left_join(b_i, by = "movieId") %>% left_join(b_u, by = "userId") %>% left_join(b_g, by = "genres") %>% left_join(b_y, by = "year") %>%
+    mutate(pred = mu + b_i + b_u + b_g + b_y) %>% pull(pred)
+  
+  data.frame(l = l, RMSE = RMSE(predicted_ratings,test$rating))
+})
+```
+
+Visualizing the optimal Lamda parameter:
+
+```{r optimal lamda year effect, echo=FALSE}
+#Visualizing the effect of Lamda
+RMSE_lamda %>% ggplot(aes(l,RMSE)) + geom_point()
+```
+
+Taking a look at our results:
+
+```{r results year effect, echo=FALSE}
+#Inputing reults
+result <- min(RMSE_lamda$RMSE)
+l <- RMSE_lamda$l[which.min(RMSE_lamda$RMSE)]
+rmse_results <- bind_rows(rmse_results, data_frame(Method = "mu + b_i + b_u + detailed_b_g + b_y", RMSE = result, Lamda = l))
+
+rmse_results %>% knitr::kable(align = "l")
+
+#Saving Optimal release year effect
+b_y <- train %>% left_join(b_i, by = "movieId") %>% left_join(b_u, by = "userId") %>% left_join(b_g, by = "genres") %>%
+  group_by(year) %>%
+  summarize(b_y = sum(rating - mu - b_i - b_u - b_g)/(n()+l))
+```
+
+## Effect of the review time
+
+The Final piece of information that can be gleaned from the data is in the timestamp variable which encodes the time the rating was placed
+
+```{r timestamp exploration, echo=TRUE}
+train %>% sample_n(3) %>% 
+  mutate(timestamp = as_datetime(timestamp)) %>% select(userId,timestamp) %>% knitr::kable(align = "l")
+```
+
+### Visualizations
+
+Visualizing the effect of the year the review was placed:
+
+```{r year of review scatter plot, echo=FALSE}
+l <- 5
+#year of review
+b_t <- train %>% left_join(b_i, by = "movieId") %>% left_join(b_u, by = "userId") %>% left_join(b_g, by = "genres") %>% left_join(b_y, by = "year")
+
+b_t %>% mutate(timestamp = year(as_datetime(timestamp))) %>% group_by(timestamp) %>%
+  summarize(b_t =  sum(rating - mu - b_i - b_u - b_g)/(n()+l), n = n()) %>% 
+  ggplot(aes(timestamp, b_t, size = n)) + 
+  geom_point(alpha = 0.3) + xlab("Rating Year")
+```
+
+Visualizing the effect of the month:
+
+```{r month of review scatter plot, echo=FALSE}
+b_t %>% mutate(timestamp = year(as_datetime(timestamp))) %>% group_by(timestamp) %>%
+  summarize(b_t =  sum(rating - mu - b_i - b_u - b_g)/(n()+l), n = n()) %>% 
+  ggplot(aes(timestamp, b_t, size = n)) + 
+  geom_point(alpha = 0.3) + xlab("Rating Year")
+```
+
+If we continue to analyze based on different time-frames we will find that the effect continues to average around zero so we can ignore the timestamp variable in our model.
+
+# Results
+
+Now That we have settled on our model $Y_{iu} = b_i + b_u + b_g + b_y + \varepsilon$ and saved the effects that optimize our RMSE we can build our final model and calculate the RMSE using the below code:
+
+```{r Final Model, echo=TRUE}
+Model <- function(validation){
+  validation <- validation %>% separate_rows(genres, sep = "\\|")
+  validation <- validation %>% 
+    mutate(year = str_extract(title,"\\(\\d{4}\\)")) %>% 
+    mutate(year = str_replace_all(year, "[//(//)]", ""))
+  
+  validation %>% left_join(b_i, by = "movieId") %>% 
+    left_join(b_u, by = "userId") %>% 
+    left_join(b_g, by = "genres") %>% 
+    left_join(b_y, by = "year") %>%
+    mutate(pred = mu + b_i + b_u + b_g + b_y) %>% pull(pred)
+}  
+
+RMSE_final <- function(validation,pred){
+  validation <- validation %>% separate_rows(genres, sep = "\\|")
+  validation <- validation %>% 
+    mutate(year = str_extract(title,"\\(\\d{4}\\)")) %>% 
+    mutate(year = str_replace_all(year, "[//(//)]", ""))
+  
+  RMSE(validation$rating,pred)
+}
+```
+
+Testing our model on our validation data:
+
+```{r testing the final model, echo=TRUE}
+pred <- Model(validation)
+Model_RMSE <- RMSE_final(validation,pred)
+```
+
+With an RMSE of `r Model_RMSE`
+
+# Conclusion
+
+We built our model by calculating regularized averages for the various possible effects that could be extracted from the data. With these effects; $b_i,b_u,b_g,b_y$, we were able to build a model with a RMSE of `r Model_RMSE`.
+
+## Technical Limitations
+
+The size of the data set makes it difficult if not impossible to run any Machine Learning algorithms on home based devices. More powerful Workstation environments or cloud based computing would allow for more complex machine learning that could improve our results
+
+## Limitations of the Data
+
+There is also the possibility that the data is not capturing all the relevant effects. Additional Information on User demographics, more granular information on the movie could also further improve our model even without access to more powerful machine learning.
+
+
