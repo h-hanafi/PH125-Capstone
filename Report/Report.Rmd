@@ -509,7 +509,7 @@ b_y <- train %>% left_join(b_i, by = "movieId") %>% left_join(b_u, by = "userId"
 
 The Final piece of information that can be gleaned from the data is in the timestamp variable which encodes the time the rating was placed
 
-```{r timestamp exploration, echo=TRUE}
+```{r timestamp exploration, echo=FALSE}
 train %>% sample_n(3) %>% 
   mutate(timestamp = as_datetime(timestamp)) %>% select(userId,timestamp) %>% knitr::kable(align = "l")
 ```
@@ -575,7 +575,7 @@ pred <- Model(validation)
 Model_RMSE <- RMSE_final(validation,pred)
 ```
 
-With an RMSE of `r Model_RMSE`
+our Model returns a RMSE of `r Model_RMSE`
 
 # Conclusion
 
